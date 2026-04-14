@@ -1,0 +1,24 @@
+# Environments
+.env
+.env.*
+venv/
+.venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+
+# System and project logs
+.DS_Store
+*.log
+*session*.json
+*scenario_log*.json
+test_real_output.txt
