@@ -30,6 +30,10 @@ from llm_interpreter import LLMInterpreter
 from look_ahead import LookAheadSimulator
 from toolgate import Toolgate
 from adapters.filesystem_adapters import setup_filesystem_adapters
+from adapters.communication_adapters import setup_communication_adapters
+from adapters.data_adapters import setup_data_adapters
+from adapters.web_adapters import setup_web_adapters
+from adapters.code_adapters import setup_code_adapters
 from config import config
 
 # Import the enhanced free energy engine
@@ -87,6 +91,10 @@ class AgentManager:
         
         # Setup tool adapters
         setup_filesystem_adapters(self.toolgate)
+        setup_communication_adapters(self.toolgate)
+        setup_data_adapters(self.toolgate)
+        setup_web_adapters(self.toolgate)
+        setup_code_adapters(self.toolgate)
         
         print(f"[Agent Manager] Initialized with EFE threshold: {threshold}")
         print(f"[Agent Manager] Maximum replanning attempts: {self.max_replans}")

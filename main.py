@@ -9,7 +9,7 @@ def test_real_active_inference():
     print("==================================================")
     
     # Initialize the real continuous agent
-    agent = AgentManager(efe_threshold=0.6, max_replans=3)
+    agent = AgentManager(efe_threshold=0.8, max_replans=3)
 
     # Allow user to assign tasks via CLI args or interactive input
     if len(sys.argv) > 1:

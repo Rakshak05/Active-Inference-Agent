@@ -70,7 +70,7 @@ def send_email_adapter(step: dict) -> str:
     args: {to: str, subject: str, body: str, html: bool (optional)}
     """
     args    = step.get("args", {})
-    to      = str(args.get("to") or args.get("recipient") or args.get("email") or "")
+    to      = str(args.get("to") or args.get("recipient") or args.get("email") or "").strip(",. ")
     subject = str(args.get("subject", "(no subject)"))
     body    = str(args.get("body") or args.get("message") or args.get("content") or "")
     html    = bool(args.get("html", False))

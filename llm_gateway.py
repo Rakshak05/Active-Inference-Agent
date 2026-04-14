@@ -10,8 +10,7 @@ class LLMGateway:
         
     def generate_completion(self, system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
         """
-        Mock implementation of an LLM call.
-        In a real application, replace this with a call to openai.ChatCompletion.create or Anthropic's client.
+        Implementation of an LLM call supporting OpenRouter and Ollama.
         """
         if config.DEBUG_MODE:
             print(f"--- LLM REQUEST ({self.model_name}) ---")
@@ -22,27 +21,44 @@ class LLMGateway:
         import urllib.error
         
         try:
-            # Local Ollama Integration
-            url = "http://localhost:11434/api/chat"
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
             model = self.model_name
             
-            data = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "stream": False,
-                "options": {
+            if self.api_key.startswith("sk-"):
+                # OpenRouter / OpenAI API Integration
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                data = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
                     "temperature": self.temperature
                 }
-            }
-            if json_mode:
-                data["format"] = "json"
+                if json_mode:
+                    data["response_format"] = {"type": "json_object"}
+            else:
+                # Local Ollama Integration
+                url = "http://localhost:11434/api/chat"
+                headers = {
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": self.temperature
+                    }
+                }
+                if json_mode:
+                    data["format"] = "json"
             
             req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
             
@@ -50,7 +66,10 @@ class LLMGateway:
                 res_body = response.read()
                 res_json = json.loads(res_body)
                 
-                content = res_json.get("message", {}).get("content", "")
+                if self.api_key.startswith("sk-"):
+                    content = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+                else:
+                    content = res_json.get("message", {}).get("content", "")
                 
                 if json_mode:
                     # Clean markdown json blocks
@@ -60,7 +79,8 @@ class LLMGateway:
                 
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode('utf-8', errors='ignore')
-            print(f"⚠️ Ollama API Error ({e.code}): {err_msg}")
+            api_name = "OpenRouter" if self.api_key.startswith("sk-") else "Ollama"
+            print(f"⚠️ {api_name} API Error ({e.code}): {err_msg}")
             raise e
         except Exception as e:
             print(f"API Error ({e}). LLM Request failed.")
