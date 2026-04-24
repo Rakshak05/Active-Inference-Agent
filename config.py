@@ -23,6 +23,10 @@ class Config:
     EFE_THRESHOLD = float(os.getenv("EFE_THRESHOLD", "0.65"))
     MAX_REPLANS   = int(os.getenv("MAX_REPLANS", "3"))
     
+    # Judge Settings
+    JUDGE_MODEL_NAME = os.getenv("JUDGE_MODEL_NAME", MODEL_NAME)
+    JUDGE_TEMPERATURE = float(os.getenv("JUDGE_TEMPERATURE", "0.5"))
+    
     # EFE Component Weights
     RISK_WEIGHT      = 1.0
     AMBIGUITY_WEIGHT = 0.7
@@ -39,5 +43,6 @@ class Config:
 
     # HTTP adapter
     HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
+    LLM_TIMEOUT  = int(os.getenv("LLM_TIMEOUT", "600"))
 
 config = Config()

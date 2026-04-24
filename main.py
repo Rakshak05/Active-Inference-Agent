@@ -108,9 +108,27 @@ def run_agent():
 
         result = agent.process_task(user_instruction=task_str, max_steps=10)
 
-        print_typing("\n=== FINAL RESULT ===", color=Fore.CYAN)
-        import json
-        print(json.dumps(result, indent=2))
+        if args.debug:
+            print_typing("\n=== FINAL RESULT (DEBUG) ===", color=Fore.CYAN)
+            import json
+            print(json.dumps(result, indent=2))
+        else:
+            print_typing("\n=== SESSION SUMMARY ===", color=Fore.CYAN)
+            status = result.get("status", "unknown")
+            cycles = result.get("cycles_completed", 0)
+            print(f"Status: {status.upper()}")
+            print(f"Cycles: {cycles}")
+            
+            # Extract final answer if reported
+            for entry in result.get("execution_history", []):
+                for res in entry.get("results", []):
+                    if res.get("step", {}).get("tool") in ("report_answer", "log_message"):
+                        print(f"\n{Fore.YELLOW}ANSWER:{Style.RESET_ALL} {res.get('actual_outcome')}")
+            
+            if "judge_verdict" in result:
+                verdict = result["judge_verdict"]
+                print(f"\nQuality Verdict: {verdict.get('verdict')} ({verdict.get('overall_score', 0)*100:.1f}%)")
+                print(f"Summary: {verdict.get('summary')}")
         
         # Prompt for next task
         print_typing("\nThe work assigned has been completed. What can I do for you now?", color=Fore.GREEN)

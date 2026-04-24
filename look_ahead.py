@@ -9,7 +9,7 @@ class LookAheadSimulator:
     def __init__(self):
         self.gateway = LLMGateway()
 
-    def simulate_policy(self, policy: list, current_context: dict) -> list:
+    def simulate_policy(self, policy: list, current_context: dict, available_tools: list = None) -> list:
         """
         Takes a sequence of steps (policy) and predicts the observations.
         Returns a 'Predicted Distribution' of outcomes.
@@ -17,10 +17,14 @@ class LookAheadSimulator:
         predicted_observations = []
         simulated_context = current_context.copy()
         
+        tools_str = f"Available Tools: {', '.join(available_tools)}" if available_tools else "No tool list provided."
+        
         for step in policy:
             sys_prompt = (
                 "You are an Environment Simulator. "
                 "Given a context and an action, predict the result. "
+                f"{tools_str}\n"
+                "CRITICAL: If the action uses a tool NOT in the 'Available Tools' list, predict a FAILURE with high risk.\n"
                 "Respond ONLY with a raw JSON object (no markdown) with exactly these keys:\n"
                 "  \"predicted_outcome\": string describing what happens,\n"
                 "  \"success_probability\": float 0-1 (how likely it succeeds),\n"

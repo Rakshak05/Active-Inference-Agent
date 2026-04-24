@@ -88,10 +88,14 @@ class MemoryManager:
     # -----------------------------------------------------
     # 1. Semantic Vector Store Methods
     # -----------------------------------------------------
-    def store_semantic_knowledge(self, document: str, metadata: Optional[Dict[str, Any]] = None):
-        """Store knowledge in vector DB for fast, semantic retrieval of past knowledge."""
+    def store_semantic_knowledge(self, document: Any, metadata: Optional[Dict[str, Any]] = None):
+        """Store knowledge in vector DB for fast, semantic retrieval. Coerced to string."""
         doc_id = f"doc_{datetime.datetime.now().timestamp()}"
         
+        # Coerce to string to avoid ChromaDB crashes
+        if not isinstance(document, str):
+            document = json.dumps(document, default=str)
+            
         # ChromaDB crashes if metadata is an empty dictionary {}
         safe_metadata = metadata if metadata else {"source": "system_memory"}
         

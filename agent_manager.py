@@ -54,6 +54,7 @@ from config import config
 from free_energy import ExpectedFreeEnergyEngine, EFEBreakdown
 from memory.memory_manager import MemoryManager
 from planning.planner import DAGTracker
+from llm_judge import LLMJudge
 
 
 @dataclass
@@ -129,6 +130,9 @@ class AgentManager:
         # Native memory adapters
         self.toolgate.register_adapter("store_memory", lambda step: self.memory.store_semantic_knowledge(step.get("args", {}).get("fact", "empty"), step.get("args", {}).get("metadata", {})) or "Fact successfully committed to long-term memory.")
         self.toolgate.register_adapter("search_memory", lambda step: self.memory.retrieve_semantic_knowledge(step.get("args", {}).get("query", ""), n_results=5))
+
+        # LLM-as-a-Judge: post-execution quality evaluator
+        self.judge = LLMJudge()
         
         print(f"[Agent Manager] Initialized with EFE threshold: {threshold}")
         print(f"[Agent Manager] Maximum replanning attempts: {self.max_replans}")
@@ -161,8 +165,8 @@ class AgentManager:
         self.world_model.set_preference(user_instruction)
         print(f"✓ Goal encoded in generative model")
         
-        # PHASE 1.5: PLANNING
-        print("\n[PHASE 1.5: PLANNING & DAG DECOMPOSITION]")
+        # PHASE 2: PLANNING
+        print("\n[PHASE 2: PLANNING & DAG DECOMPOSITION]")
         context = self.world_model.get_context()
         context["semantic_memory"] = self.memory.retrieve_semantic_knowledge(user_instruction, n_results=3)
         
@@ -174,7 +178,7 @@ class AgentManager:
         hitl_interrupt = HITLInterruptHandler()
         
         # CONTINUOUS ACTIVE INFERENCE LOOP
-        print("\n[PHASE 2: ACTIVE INFERENCE LOOP]")
+        print("\n[PHASE 3: ACTIVE INFERENCE LOOP]")
         
         step = 0
         while step < max_steps and not self.dag.is_fully_completed():
@@ -203,13 +207,19 @@ class AgentManager:
                             
             print(self.dag.get_plan_state())
             
-            ready_tasks = self.dag.get_ready_tasks()
-            if not ready_tasks:
-                print("No tasks ready. Possible deadlock or failed subtask.")
-                break
-                
-            current_subtask = ready_tasks[0]
-            self.dag.start_task(current_subtask.id)
+            # Prioritize in_progress tasks, then pending tasks with met dependencies
+            active_tasks = [t for t in self.dag.tasks.values() if t.status == "in_progress"]
+            if active_tasks:
+                current_subtask = active_tasks[0]
+            else:
+                ready_tasks = self.dag.get_ready_tasks()
+                if not ready_tasks:
+                    print("No tasks ready. Possible deadlock or failed subtask.")
+                    break
+                current_subtask = ready_tasks[0]
+                # Transition to in_progress
+                self.dag.start_task(current_subtask.id)
+            
             print(f"> Executing Subtask [{current_subtask.id}]: {current_subtask.description}")
             
             # Build context: world model state + completed steps summary
@@ -218,8 +228,16 @@ class AgentManager:
             context["available_vars"] = list(self._cycle_var_store.keys())
             
             # Inject Persistent Memory
-            context["semantic_memory"] = self.memory.retrieve_semantic_knowledge(current_subtask.description, n_results=3)
-            context["recent_episodes"] = self.memory.get_recent_episodes(limit=3)
+            sem_mem = self.memory.retrieve_semantic_knowledge(current_subtask.description, n_results=3)
+            rec_epi = self.memory.get_recent_episodes(limit=3)
+            
+            context["semantic_memory"] = sem_mem
+            context["recent_episodes"] = rec_epi
+            
+            # Also make them available as variables for tools
+            self._cycle_var_store["semantic_memory"] = sem_mem
+            self._cycle_var_store["recent_episodes"] = rec_epi
+
             
             policy, predictions, efe_breakdown = self._evaluate_next_action(current_subtask.description, context)
             
@@ -279,7 +297,11 @@ class AgentManager:
             self.world_model.update_beliefs(execution_result)
             
             if execution_result.get("status") == "success":
-                print("[Self-Evaluation] Running Post-Action Validation...")
+                # SPEED OPTIMIZATION: Skip validation for safe gathering tools unless it's a reporting tool
+                if action_tool in self._SAFE_TOOLS and action_tool not in self._REPORT_TOOLS:
+                    print(f"[Speed Opt] Assuming success for safe tool: {action_tool}")
+                else:
+                    print("[Self-Evaluation] Running Post-Action Validation...")
                 
                 # Strip out 'raw' data from results to prevent massive LLM contexts
                 clean_execution = {**execution_result}
@@ -298,7 +320,12 @@ class AgentManager:
                     execution_result["status"] = "error" # Override status to force failure track
                     execution_result["error"] = validation_feedback
                 else:
-                    print("  └─ [Validation Passed] Step outcome aligns with goal.")
+                    print(f"  └─ [Validation Passed] {validation_feedback}")
+                    # ── AUTO-COMPLETION ──
+                    # If the validator confirms the subtask is done, mark it complete in the DAG.
+                    print(f"  └─ [Agent Manager] Subtask '{current_subtask.id}' marked completed by validation.")
+                    self.dag.complete_task(current_subtask.id)
+
 
             # Stop if there was a critical failure
             if execution_result.get("status") == "error":
@@ -336,6 +363,68 @@ class AgentManager:
         print("\n" + "="*80)
         print("[TASK COMPLETE]")
         print("="*80)
+
+        # ── LLM-AS-A-JUDGE: Post-task evaluation + control loop ───────────────
+        try:
+            # Design Fix 7: better final output for judge
+            report_tool_results = [
+                r.get("actual_outcome", "") 
+                for cycle in self.execution_history 
+                for r in cycle.get("results", []) 
+                if r.get("step", {}).get("tool") == "report_answer"
+            ]
+            final_summary = report_tool_results[-1] if report_tool_results else f"Task status: {status}. Cycles: {step}/{max_steps}."
+
+            judge_verdict = self.judge.evaluate(
+                task=user_instruction,
+                execution_log=self.execution_history,
+                final_output=final_summary,
+                context={"status": status, "cycles_completed": step},
+            )
+            print(judge_verdict)                               # pretty verdict box
+            final_report["judge_verdict"] = judge_verdict.as_dict()
+
+            # ── CONTROL LOOP ──────────────────────────────────────────────────
+            if judge_verdict.verdict == "FAIL":
+                print("\n[Judge Control Loop] FAIL verdict → triggering autonomous replan…")
+                hints_str = "\n".join(f"- {h}" for h in judge_verdict.improvement_hints)
+                replan_instruction = (
+                    f"{user_instruction}\n\n"
+                    f"[JUDGE REPLAN] Previous attempt scored {judge_verdict.overall_score*100:.1f}% "
+                    f"(FAIL). Address these issues and retry:\n{hints_str}"
+                )
+                print(f"[Judge Control Loop] Re-submitting task with judge feedback injected.")
+                # Recursive retry — one level deep to prevent infinite loops
+                if not getattr(self, '_judge_retry_active', False):
+                    self._judge_retry_active = True
+                    try:
+                        retry_report = self.process_task(replan_instruction, max_steps=max_steps)
+                        final_report["judge_retry"] = retry_report
+                    finally:
+                        self._judge_retry_active = False
+                else:
+                    print("[Judge Control Loop] Retry already in progress — skipping nested replan.")
+
+            elif judge_verdict.verdict == "WARN":
+                print("\n[Judge Control Loop] WARN verdict → self-reflection stored for next run.")
+                reflection_text = (
+                    f"[Self-Reflection] Task '{user_instruction[:80]}' scored WARN "
+                    f"({judge_verdict.overall_score*100:.1f}%). "
+                    f"Weak areas: "
+                    + ", ".join(
+                        f"{c.name}={c.score*100:.0f}%"
+                        for c in judge_verdict.criteria if c.score < 0.65
+                    )
+                    + f". Hints: {'; '.join(judge_verdict.improvement_hints[:2])}"
+                )
+                self.memory.store_semantic_knowledge(
+                    reflection_text,
+                    metadata={"type": "self_reflection", "verdict": "WARN"}
+                )
+                print(f"  └─ Reflection stored to semantic memory.")
+
+        except Exception as judge_err:
+            print(f"[LLM Judge] Evaluation skipped: {judge_err}")
         
         return final_report
 
@@ -346,12 +435,20 @@ class AgentManager:
         return self.memory.get_working_context()
 
     _WRITE_TOOLS = {"write_file", "write_csv", "write_json", "create_directory", "copy_file", "move_file", "download_file"}
+    _REPORT_TOOLS = {"report_answer", "log_message"}
+    _SAFE_TOOLS = {"read_file", "list_directory", "search_memory", "check_path", "log_message", "report_answer", "read_json", "read_csv", "filter_records", "transform_records", "slice_records", "get_field_values", "evaluate", "web_search", "http_get", "extract_info"}
 
     def _is_task_complete(self, instruction: str, last_tool: str) -> bool:
         """
         Heuristic: if the last action was a write/create tool and every filename
         mentioned in the instruction that looks like an output file now exists on disk.
+        OR if the last action was a reporting tool for a reporting-related instruction.
         """
+        if last_tool in self._REPORT_TOOLS:
+            keywords = ["report", "provide", "answer", "summarize", "tell", "notify"]
+            if any(k in instruction.lower() for k in keywords):
+                return True
+
         if last_tool not in self._WRITE_TOOLS:
             return False
         import re, os
@@ -394,6 +491,14 @@ class AgentManager:
             # Clear feedback after consuming it
             del context["failure_feedback"]
 
+        # Addition: Aggressive Completion Hint
+        awareness += (
+            "\n\nCRITICAL COMPLETION RULE: If the user's question is already answered by an 'actual_outcome' in the history above, "
+            "you MUST output a 'report_answer' tool call immediately with that information. "
+            "Do NOT proceed with further storage or processing steps."
+        )
+
+
         refined_instruction = instruction
         
         for attempt in range(1, self.max_replans + 1):
@@ -409,9 +514,30 @@ class AgentManager:
             if policy[0].get("tool") in ("task_complete", "end_task", "done"):
                 return policy, [], None  # efe_breakdown not needed for completion
                 
-            predictions = self.simulator.simulate_policy(policy, context)
-            preferences = self.world_model.preferences.get_preferences()
-            efe_breakdown = self.efe_engine.compute_efe(policy, predictions, preferences, context=context)
+            tool_name = policy[0].get("tool")
+            
+            # SPEED OPTIMIZATION: Skip simulation for inherently safe tools
+            if tool_name in self._SAFE_TOOLS:
+                print(f"[Speed Opt] Skipping simulation for safe tool: {tool_name}")
+                from free_energy import EFEBreakdown
+                # Minimal dummy breakdown that is always acceptable
+                efe_breakdown = EFEBreakdown(
+                    total_efe=0.1, 
+                    risk=0.01, 
+                    ambiguity=0.1, 
+                    risk_components={}, 
+                    ambiguity_components={}, 
+                    threshold=config.EFE_THRESHOLD,
+                    is_acceptable=True
+                )
+
+                predictions = [{"tool": tool_name, "predicted_outcome": "Safe data gathering operation"}]
+            else:
+                available_tools = list(self.toolgate.adapters.keys())
+                predictions = self.simulator.simulate_policy(policy, context, available_tools=available_tools)
+                preferences = self.world_model.preferences.get_preferences()
+                efe_breakdown = self.efe_engine.compute_efe(policy, predictions, preferences, context=context)
+
             
             print(f"--- Agent Analysis (Attempt {attempt}) ---")
             print(efe_breakdown)
@@ -461,6 +587,23 @@ class AgentManager:
             if tool_name in HIGH_RISK_TOOLS:
                 print(f"\n[HITL Checkpoint] The agent wants to execute a HIGH-RISK tool: '{tool_name}'")
                 print(f"Arguments: {json.dumps(resolved_step.get('args', {}), indent=2)}")
+
+                # ── ONLINE GOVERNOR: LLM judge gate before human prompt ────────
+                gov_score, gov_reason = self.judge.evaluate_step(
+                    task=getattr(self, 'current_task', ''),
+                    subtask=tool_name,
+                    action=resolved_step,
+                    proposed_outcome=None,
+                )
+                print(f"[Online Governor] Action quality score: {gov_score*100:.1f}%")
+                print(f"  └─ {gov_reason}")
+                if gov_score < 0.4:
+                    print(f"[Online Governor] Score too low ({gov_score*100:.1f}%) — action BLOCKED without human review.")
+                    raise Exception(
+                        f"Online Governor blocked '{tool_name}' (score={gov_score*100:.1f}%, "
+                        f"reason: {gov_reason})"
+                    )
+
                 approved = False
                 while not approved:
                     choice = input("[HITL] Do you approve? (y)es, (n)o, (e)dit: ").strip().lower()
@@ -473,24 +616,70 @@ class AgentManager:
                         try:
                             resolved_step["args"] = json.loads(new_args)
                             print("Override applied successfully.")
-                            # Still ask to approve just in case they typo'd
                         except json.JSONDecodeError:
                             print("Invalid JSON. Try again.")
+
+            # ── specialized control-flow tools ────────────────────────────────
+            if tool_name in ("foreach", "conditional"):
+                print(f"[Toolgate]   Running control-flow '{tool_name}' …")
+                try:
+                    # Defer control flow back to Toolgate's native logic
+                    # We pass the unresolved step because Toolgate does its own resolution internally
+                    res = self.toolgate._execute_step(step, self._cycle_var_store)
+                    # Bug 3 Guard: ensure 'step' key exists
+                    if isinstance(res, dict) and "step" not in res:
+                        res = {"step": step, **res}
+                    results.append(res)
+                    continue
+                except Exception as e:
+                    print(f"[Toolgate] X '{tool_name}' raised: {e}")
+                    results.append({"step": step, "error": str(e), "status": "error"})
+                    continue
 
             if tool_name in self.toolgate.adapters:
                 print(f"[Toolgate]   Running '{tool_name}' …")
                 try:
                     raw_result = self.toolgate.adapters[tool_name](resolved_step)
+                    
+                    status = "success"
+                    if tool_name == "web_search":
+                        if len(raw_result) > 0:
+                            print(f"[Speed Opt] Assuming search success with {len(raw_result)} results.")
+                        else:
+                            status = "error"
+                            print("[Web] Search returned 0 results. Marking as error for re-planning.")
+                    
                     output_var = step.get("output_var")
                     if output_var:
                         self._cycle_var_store[output_var] = raw_result
                         print(f"[Toolgate]     └─ saved to ${output_var}")
+                    # --- TERMINATION OPT: If report_answer is called, we are DONE ---
+                    if tool_name == "report_answer":
+                        print("[Agent Manager] Final answer reported. Terminating task execution.")
+                        results.append({
+                            "step": step,
+                            "actual_outcome": self.toolgate._summarise(raw_result),
+                            "raw": raw_result,
+                            "status": status,
+                        })
+                        # Signal completion to the DAG
+                        for subtask in self.dag.tasks.values():
+                            if subtask.status != "completed":
+                                subtask.status = "completed"
+                        
+                        # Fix Inconsistent Return: must return the full 'record' dict
+                        record = self._build_execution_record(results, efe_breakdown)
+                        return record
+                    
+                    # Standard tool execution record
                     results.append({
                         "step": step,
                         "actual_outcome": self.toolgate._summarise(raw_result),
                         "raw": raw_result,
-                        "status": "success",
+                        "status": status,
                     })
+
+
                 except Exception as e:
                     print(f"[Toolgate] X '{tool_name}' raised: {e}")
                     results.append({"step": step, "error": str(e), "status": "error"})
@@ -502,8 +691,12 @@ class AgentManager:
                     "status": "skipped",
                 })
 
+        return self._build_execution_record(results, efe_breakdown)
+
+    def _build_execution_record(self, results: List[Dict], efe_breakdown: Optional[EFEBreakdown]) -> Dict:
+        """Helper to build a consistent execution record and log to memory."""
         efe_val = efe_breakdown.total_efe if efe_breakdown else 0.0
-        any_error = any(r.get("status") == "error" for r in results)
+        any_error = any(r.get("status") in ("error", "skipped") for r in results)
         
         # Log episode to persistent memory and working context
         for r in results:
@@ -514,7 +707,6 @@ class AgentManager:
                 result=r.get("actual_outcome", r.get("error", "unknown")),
                 efe_score=efe_val
             )
-            # 3. Add to Working Context (pruned automatically by tokens)
             self.memory.add_working_context({
                 "tool": r["step"].get("tool", "unknown"),
                 "outcome": r.get("actual_outcome", r.get("error", "unknown"))
@@ -526,6 +718,11 @@ class AgentManager:
             "efe": efe_val,
             "timestamp": datetime.now().isoformat()
         }
+        
+        if any_error:
+            failed_res = next(r for r in results if r.get("status") in ("error", "skipped"))
+            record["error"] = failed_res.get("error") or failed_res.get("actual_outcome")
+
         self.execution_history.append(record)
         return record
             

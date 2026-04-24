@@ -9,6 +9,7 @@ import csv
 import json
 import io
 import re
+from llm_gateway import LLMGateway
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -19,11 +20,19 @@ def _path(step: dict) -> str:
     return os.path.normpath(str(raw).strip())
 
 
-def _resolve_data(value, context: dict):
-    """If value is a $var reference, pull from context."""
-    if isinstance(value, str) and value.startswith("$"):
-        return context.get(value[1:], value)
-    return value
+def _coerce_list(data):
+    """If data is a JSON string of a list, parse it. If it's a single item, wrap it."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, str) and data.strip().startswith("["):
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, list):
+                return parsed
+        except:
+            pass
+    return [data] if data is not None else []
+
 
 
 # ── CSV ────────────────────────────────────────────────────────────────────────
@@ -107,13 +116,11 @@ def filter_records_adapter(step: dict):
       value: any
     """
     args  = step.get("args", {})
-    data  = args.get("data", [])
+    data  = _coerce_list(args.get("data", []))
     field = str(args.get("field", ""))
     op    = str(args.get("op", "eq")).lower()
     value = args.get("value")
 
-    if not isinstance(data, list):
-        raise TypeError("filter_records: 'data' must be a list.")
 
     ops = {
         "eq":         lambda a, b: str(a) == str(b),
@@ -142,12 +149,10 @@ def transform_records_adapter(step: dict):
       template: str      (e.g. "Hello {name}, your ID is {id}")
     """
     args         = step.get("args", {})
-    data         = args.get("data", [])
+    data         = _coerce_list(args.get("data", []))
     output_field = str(args.get("output_field", "transformed"))
     template     = str(args.get("template", ""))
 
-    if not isinstance(data, list):
-        raise TypeError("transform_records: 'data' must be a list.")
 
     result = []
     for record in data:
@@ -168,7 +173,8 @@ def slice_records_adapter(step: dict):
     args: {data: list|"$varname", start: int, end: int}
     """
     args  = step.get("args", {})
-    data  = args.get("data", [])
+    data  = _coerce_list(args.get("data", []))
+
     start = int(args.get("start", 0))
     end   = args.get("end")
     sliced = data[start:end] if end is not None else data[start:]
@@ -182,10 +188,29 @@ def get_field_values_adapter(step: dict):
     args: {data: list|"$varname", field: str}
     """
     args  = step.get("args", {})
-    data  = args.get("data", [])
+    data  = _coerce_list(args.get("data", []))
+
     field = str(args.get("field", ""))
     values = [r.get(field) for r in data if isinstance(r, dict)]
     return values
+
+
+def extract_info_adapter(step: dict):
+    """
+    Use LLM to extract specific information from a text blob.
+    args: {data: str|"$varname", instruction: str}
+    """
+    args = step.get("args", {})
+    data = str(args.get("data", "No data provided."))
+    instruction = str(args.get("instruction", "Extract information."))
+
+    gateway = LLMGateway()
+    sys_prompt = "You are a precise Information Extractor. Extract only the requested information from the data. Be concise. If the information is not found, state 'Not found'."
+    usr_prompt = f"Data:\n{data[:8000]}\n\nInstruction: {instruction}"
+    
+    result = gateway.generate_completion(sys_prompt, usr_prompt)
+    print(f"[Data] extract_info: instructions='{instruction}'")
+    return result
 
 
 # ── registration ───────────────────────────────────────────────────────────────
@@ -199,4 +224,5 @@ def setup_data_adapters(toolgate):
     toolgate.register_adapter("transform_records",   transform_records_adapter)
     toolgate.register_adapter("slice_records",       slice_records_adapter)
     toolgate.register_adapter("get_field_values",    get_field_values_adapter)
+    toolgate.register_adapter("extract_info",        extract_info_adapter)
     print("[Adapters] Data adapters registered.")

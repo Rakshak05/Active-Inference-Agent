@@ -152,7 +152,7 @@ def send_webhook_adapter(step: dict):
     data = json.dumps(payload).encode("utf-8")
     req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=config.HTTP_TIMEOUT) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             print(f"[Webhook] POST {url} → {resp.status}")
             try:
@@ -211,5 +211,6 @@ def setup_communication_adapters(toolgate):
     toolgate.register_adapter("notify",            send_email_adapter)   # alias
     toolgate.register_adapter("send_webhook",      send_webhook_adapter)
     toolgate.register_adapter("log_message",       log_message_adapter)
+    toolgate.register_adapter("report_answer",     log_message_adapter)  # alias for final reporting
     toolgate.register_adapter("print_table",       print_table_adapter)
     print("[Adapters] Communication adapters registered.")

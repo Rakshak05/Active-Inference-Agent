@@ -22,3 +22,17 @@ __pycache__/
 *session*.json
 *scenario_log*.json
 test_real_output.txt
+
+# Sensitive data and runtime state
+data/user_profile.json
+data/memory/
+semantic_memory.json
+judge_calibration.json
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Windows
+Thumbs.db

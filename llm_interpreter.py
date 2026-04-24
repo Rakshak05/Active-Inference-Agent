@@ -39,14 +39,17 @@ TOOL_REGISTRY = {
   transform_records args: {data, output_field, template} → list with new field
   slice_records    args: {data, start, end}              → sublist
   get_field_values args: {data, field}                   → flat list of values
+  extract_info     args: {data, instruction}              → extracted string (info from raw text)
 '''
+
     },
     "WEB": {
         "metadata": {"cost": "medium (API limits)", "latency": "1-3s", "risk": "low", "description": "HTTP requests & downloading"},
         "tools": '''
-  http_get         args: {url, headers?, params?}        → response (auto JSON)
-  http_post        args: {url, body, headers?}           → response (auto JSON)
-  download_file    args: {url, path}                     → confirmation
+  http_get         args: {url, headers, params}         → structured response {content, status}
+  http_post        args: {url, body, headers, json_body}  → response body
+  web_search       args: {query}                         → list of {title, link, snippet}
+  download_file    args: {url, path}                     → success message
 '''
     },
     "COMMUNICATION": {
@@ -56,6 +59,7 @@ TOOL_REGISTRY = {
   send_emails_bulk args: {recipients, subject_template, body_template, to_field?}
   send_webhook     args: {url, payload}                  → response
   log_message      args: {message}                       → echoed message
+  report_answer    args: {message}                       → final answer displayed to user
   print_table      args: {data, fields?}                 → formatted table string
 '''
     },
@@ -71,8 +75,10 @@ TOOL_REGISTRY = {
 VARIABLE_SYSTEM_DOCS = """
 === VARIABLE SYSTEM (TOOL CHAINING) ===
 • Add "output_var": "myvar" to any step to store its return value.
-• Reference stored values anywhere in later args using "$myvar". This chains outputs securely without LLM loops!
+• Reference stored values anywhere in later args using "$myvar".
+• NESTED ACCESS: Supports dots and brackets, e.g., "$myvar.field" or "$myvar[0].id". This chains outputs securely!
 • Add "fallback": { step_object } to gracefully degrade if the main tool fails.
+
 
 === CONTROL FLOW ===
   foreach          args: {items: "$listvar", steps: [ ... ]}
@@ -90,6 +96,24 @@ class LLMInterpreter:
         Tool Intent Router: Decides WHICH tool categories are relevant 
         to avoid blinding the planner with irrelevant massive tool catalogs.
         """
+        # --- SPEED OPTIMIZATION: Heuristic Router ---
+        lower_task = user_instruction.lower()
+        fast_cats = set()
+        if any(k in lower_task for k in ("file", "read", "write", "list", "check", "folder", "directory", "path", "move", "copy", "delete")):
+            fast_cats.add("FILESYSTEM")
+        if any(k in lower_task for k in ("json", "csv", "memory", "search", "fact", "record", "filter", "data", "transform")):
+            fast_cats.add("DATA")
+        if any(k in lower_task for k in ("http", "url", "download", "web", "get", "post", "internet", "api")):
+            fast_cats.add("WEB")
+        if any(k in lower_task for k in ("email", "webhook", "log", "message", "report", "notify", "table")):
+            fast_cats.add("COMMUNICATION")
+        if any(k in lower_task for k in ("python", "code", "evaluate", "execute", "calculate", "math")):
+            fast_cats.add("CODE")
+        
+        if fast_cats:
+            return list(fast_cats)
+        # ---------------------------------------------
+
         categories_map = {k: v["metadata"]["description"] for k, v in TOOL_REGISTRY.items()}
         sys_prompt = (
             "You are a Tool Intent Router. Based on the task, return ONLY a JSON array of required Tool Categories.\n"
@@ -172,9 +196,11 @@ Respond with a RAW JSON array only — no markdown fences. Example:
             "You are the Strategic Planner for an AI Agent. "
             "Break down the user's complex task into a Directed Acyclic Graph (DAG) of explicit sub-goals.\n"
             "CRITICAL CAPABILITIES: The agent has native tools for Filesystem, Code Execution, HTTP requests, and a Persistent Semantic Memory VectorDB (search_memory, store_memory).\n"
-            "RULE 1: If the user asks to 'Remember' something, the goal is 'Store fact in memory'.\n"
+            "RULE 1: ONLY plan a 'Store fact in memory' goal if the user explicitly asks you to 'Remember', 'Save', or 'Store' something, or if the info is unique company knowledge. DO NOT store general facts or software versions.\n"
             "RULE 2: If the user asks about personal context, past interactions, or explicit past facts, the first goal MUST be 'Search memory for facts'.\n"
-            "RULE 3: If the user asks for general real-world facts, recent news, or the 'latest version' of external software, DO NOT search memory. Instead, use HTTP requests to search the internet.\n"
+            "RULE 3: If the user asks for the 'latest version' of software, DO NOT search memory first. Use 'web_search' to find current info on the internet.\n"
+            "RULE 4: For simple requests like 'What is the latest version of X?', the DAG MUST be exactly 2 steps: 1. Search, 2. Report Answer. Do NOT add storage, memory retrieval, or comparison steps.\n"
+            "RULE 5: Every informational task MUST conclude with: 'Provide a final comprehensive answer to the user'.\n"
             "Return ONLY a RAW JSON array of objects with these keys:\n"
             "  'id' (string, e.g., 'step_1')\n"
             "  'description' (string, concrete and actionable)\n"
@@ -240,6 +266,28 @@ Respond with a RAW JSON array only — no markdown fences. Example:
             return parsed.get("success", False), parsed.get("feedback", "No feedback provided.")
         except:
             return False, "Failed to parse validation response."
+
+    def judge_final_output(
+        self,
+        task: str,
+        execution_log: list,
+        final_output: str = "",
+    ):
+        """
+        Convenience wrapper: run the LLM judge on a completed execution.
+
+        Returns a JudgeVerdict (see llm_judge.py) or None on import failure.
+        """
+        try:
+            from llm_judge import LLMJudge
+            return LLMJudge(gateway=self.gateway).evaluate(
+                task=task,
+                execution_log=execution_log,
+                final_output=final_output,
+            )
+        except Exception as exc:
+            print(f"[LLMInterpreter.judge_final_output] Failed: {exc}")
+            return None
 
     # ── parsing ────────────────────────────────────────────────────────────────
 

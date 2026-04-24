@@ -183,20 +183,43 @@ class Toolgate:
         return value
 
     def _resolve_string(self, s: str, context: dict):
-        """Resolve a single string that may be a $var or $var.field."""
+        """
+        Resolve a string that may be a $var or $var.field[index].path.
+        Supports:
+          $var
+          $var.field
+          $var[0]
+          $var.results[0].content
+        """
         if not s.startswith("$"):
             return s
-        path = s[1:].split(".")       # e.g. "patient.email" → ["patient", "email"]
-        val  = context.get(path[0])
-        for key in path[1:]:
-            if isinstance(val, dict):
-                val = val.get(key)
-            elif hasattr(val, key):
-                val = getattr(val, key)
-            else:
-                val = None
-                break
+        
+        import re
+        # Strip leading $ and split by . or [index]
+        # Regex to find: .field or [index]
+        parts = re.findall(r'([^.\[\]]+)|\[(\d+)\]', s[1:])
+        
+        # parts will look like: [('var', ''), ('field', ''), ('', '0')]
+        val = context.get(parts[0][0]) if parts else None
+        
+        for i in range(1, len(parts)):
+            key, idx = parts[i]
+            if not val: break
+            
+            if idx: # It's an array index
+                try:
+                    val = val[int(idx)]
+                except (IndexError, TypeError, KeyError):
+                    val = None
+            elif key: # It's a field
+                if isinstance(val, dict):
+                    val = val.get(key)
+                elif hasattr(val, key):
+                    val = getattr(val, key)
+                else:
+                    val = None
         return val
+
 
     # ── helpers ────────────────────────────────────────────────────────────────
 
