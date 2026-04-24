@@ -1,0 +1,14 @@
+[
+  {
+    "document": "CUDA Toolkit 13.1 Update 1",
+    "metadata": {
+      "source": "http_get"
+    }
+  },
+  {
+    "document": "My company uses PostgreSQL",
+    "metadata": {
+      "source": "user instruction"
+    }
+  }
+]

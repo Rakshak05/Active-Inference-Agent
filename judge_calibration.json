@@ -1,0 +1,15 @@
+{
+  "_comment": "Task-type-specific PASS/WARN thresholds for the LLM Judge.",
+  "_comment2": "Keys are matched as case-insensitive substrings of the task description.",
+  "_comment3": "Add new task types as needed. 'default' is the universal fallback.",
+
+  "coding":       { "pass": 0.75, "warn": 0.55 },
+  "email":        { "pass": 0.65, "warn": 0.45 },
+  "research":     { "pass": 0.72, "warn": 0.52 },
+  "delete":       { "pass": 0.80, "warn": 0.65 },
+  "deploy":       { "pass": 0.78, "warn": 0.60 },
+  "search":       { "pass": 0.68, "warn": 0.48 },
+  "file_write":   { "pass": 0.70, "warn": 0.50 },
+  "file_delete":  { "pass": 0.85, "warn": 0.70 },
+  "default":      { "pass": 0.70, "warn": 0.50 }
+}
