@@ -21,6 +21,10 @@ class LLMGateway:
         import urllib.error
         
         try:
+            from environment_probe import RateLimitTracker
+            # Approximate prompt tokens tracking
+            RateLimitTracker.log_call(estimated_prompt_tokens=len(system_prompt)//4 + len(user_prompt)//4)
+            
             model = self.model_name
             
             if self.api_key.startswith("sk-"):
@@ -62,7 +66,8 @@ class LLMGateway:
             
             req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
             
-            with urllib.request.urlopen(req) as response:
+            # with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=120) as response:
                 res_body = response.read()
                 res_json = json.loads(res_body)
                 
@@ -80,7 +85,7 @@ class LLMGateway:
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode('utf-8', errors='ignore')
             api_name = "OpenRouter" if self.api_key.startswith("sk-") else "Ollama"
-            print(f"⚠️ {api_name} API Error ({e.code}): {err_msg}")
+            print(f"{api_name} API Error ({e.code}): {err_msg}")
             raise e
         except Exception as e:
             print(f"API Error ({e}). LLM Request failed.")

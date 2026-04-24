@@ -20,7 +20,14 @@ import os
 import datetime
 import traceback
 from typing import Any
+import builtins
 
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    restricted_modules = {"os", "subprocess", "shutil", "sys"}
+    base_name = name.split(".")[0]
+    if base_name in restricted_modules:
+        raise ImportError(f"Importing '{name}' is restricted in the sandbox.")
+    return builtins.__import__(name, globals, locals, fromlist, level)
 
 _SAFE_BUILTINS = {
     "print": print, "len": len, "range": range, "enumerate": enumerate,
@@ -30,6 +37,7 @@ _SAFE_BUILTINS = {
     "set": set, "tuple": tuple, "type": type, "isinstance": isinstance,
     "hasattr": hasattr, "getattr": getattr, "repr": repr,
     "True": True, "False": False, "None": None,
+    "__import__": _safe_import,
 }
 
 _SAFE_MODULES = {

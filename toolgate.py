@@ -62,7 +62,7 @@ class Toolgate:
 
         # ── dispatch to adapter ────────────────────────────────────────────────
         if tool_name in self.adapters:
-            print(f"[Toolgate] ▶  Running '{tool_name}' …")
+            print(f"[Toolgate] >  Running '{tool_name}' …")
             try:
                 raw_result = self.adapters[tool_name](resolved_step)
 
@@ -79,11 +79,14 @@ class Toolgate:
                     "status":         "success",
                 }
             except Exception as e:
-                print(f"[Toolgate] ✗ '{tool_name}' raised: {e}")
+                print(f"[Toolgate] X '{tool_name}' raised: {e}")
+                if "fallback" in step and isinstance(step["fallback"], dict):
+                    print(f"[Toolgate] >  Executing Fallback Handler for '{tool_name}'...")
+                    return self._execute_step(step["fallback"], context)
                 return {"step": step, "error": str(e), "status": "error"}
 
         else:
-            print(f"[Toolgate] ⚠  No adapter for '{tool_name}'. Skipping.")
+            print(f"[Toolgate] !  No adapter for '{tool_name}'. Skipping.")
             return {
                 "step":           step,
                 "actual_outcome": f"No adapter registered for tool: '{tool_name}'",
@@ -201,12 +204,12 @@ class Toolgate:
     def _summarise(raw) -> str:
         """Convert any adapter return value to a concise string for logging."""
         if isinstance(raw, str):
-            return raw[:500]
+            return raw[:3000]
         if isinstance(raw, (list, dict)):
             import json
             try:
                 s = json.dumps(raw, default=str)
-                return s[:500] + ("…" if len(s) > 500 else "")
+                return s[:3000] + ("…" if len(s) > 3000 else "")
             except Exception:
                 pass
-        return str(raw)[:500]
+        return str(raw)[:3000]

@@ -53,6 +53,16 @@ def http_get_adapter(step: dict):
                     return json.loads(body)
                 except Exception:
                     pass
+            
+            if "text/html" in content_type:
+                import re
+                # Naive text extraction
+                text = re.sub(r'<script.*?</script>', '', body, flags=re.IGNORECASE | re.DOTALL)
+                text = re.sub(r'<style.*?</style>', '', text, flags=re.IGNORECASE | re.DOTALL)
+                text = re.sub(r'<[^>]+>', ' ', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                return text
+                
             return body
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code} from {url}: {e.read().decode('utf-8', errors='ignore')}")
