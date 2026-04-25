@@ -24,10 +24,10 @@ __pycache__/
 test_real_output.txt
 
 # Sensitive data and runtime state
-data/user_profile.json
-data/memory/
+data/
 semantic_memory.json
 judge_calibration.json
+latest_cuda_version.json
 
 # Build artifacts
 *.egg-info/
