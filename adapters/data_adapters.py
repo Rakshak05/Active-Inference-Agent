@@ -201,8 +201,25 @@ def extract_info_adapter(step: dict):
     args: {data: str|"$varname", instruction: str}
     """
     args = step.get("args", {})
-    data = str(args.get("data", "No data provided."))
+    raw_data = args.get("data", "No data provided.")
     instruction = str(args.get("instruction", "Extract information."))
+
+    if isinstance(raw_data, list):
+        documents = []
+        for item in raw_data[:5]:
+            if isinstance(item, dict) and "document" in item:
+                documents.append(str(item["document"]))
+            else:
+                documents.append(str(item))
+
+        if documents:
+            keywords = [word for word in re.findall(r"\w+", instruction.lower()) if len(word) > 3]
+            keyword_hits = [doc for doc in documents if any(word in doc.lower() for word in keywords)]
+            chosen = keyword_hits[:3] if keyword_hits else documents[:3]
+            print(f"[Data] extract_info fast path: instructions='{instruction}'")
+            return " ".join(chosen)[:2000]
+
+    data = str(raw_data)
 
     gateway = LLMGateway()
     sys_prompt = "You are a precise Information Extractor. Extract only the requested information from the data. Be concise. If the information is not found, state 'Not found'."

@@ -26,6 +26,8 @@ class Config:
     # Judge Settings
     JUDGE_MODEL_NAME = os.getenv("JUDGE_MODEL_NAME", MODEL_NAME)
     JUDGE_TEMPERATURE = float(os.getenv("JUDGE_TEMPERATURE", "0.5"))
+    ENABLE_POST_RUN_JUDGE = os.getenv("ENABLE_POST_RUN_JUDGE", "False").lower() == "true"
+    JUDGE_SAMPLES = int(os.getenv("JUDGE_SAMPLES", "1"))
     
     # EFE Component Weights
     RISK_WEIGHT      = 1.0

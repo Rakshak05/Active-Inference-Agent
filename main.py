@@ -94,12 +94,6 @@ def run_agent():
         print_typing("Thinking...", delay=0.03, color=Fore.MAGENTA)
         print_typing("Updating internal beliefs...", delay=0.03, color=Fore.MAGENTA)
         
-        # Progress indicator integration
-        from tqdm import tqdm
-        import time
-        for _ in tqdm(range(25), desc="Evaluating possible actions", ascii=False, colour="magenta"):
-            time.sleep(0.02)
-
         import uuid
         session_id = str(uuid.uuid4())
         print_typing(f"\n[Task Initialized | Session {session_id[:8]}]: {task_str}\n", color=Fore.GREEN)

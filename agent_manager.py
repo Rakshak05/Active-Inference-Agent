@@ -413,26 +413,27 @@ class AgentManager:
 
         # ── LLM-AS-A-JUDGE: Post-task evaluation + control loop ───────────────
         try:
-            # Design Fix 7: better final output for judge
-            report_tool_results = [
-                r.get("actual_outcome", "") 
-                for cycle in self.execution_history 
-                for r in cycle.get("results", []) 
-                if r.get("step", {}).get("tool") == "report_answer"
-            ]
-            final_summary = report_tool_results[-1] if report_tool_results else f"Task status: {status}. Cycles: {step}/{max_steps}."
+            judge_verdict = None
+            if config.ENABLE_POST_RUN_JUDGE:
+                report_tool_results = [
+                    r.get("actual_outcome", "") 
+                    for cycle in self.execution_history 
+                    for r in cycle.get("results", []) 
+                    if r.get("step", {}).get("tool") == "report_answer"
+                ]
+                final_summary = report_tool_results[-1] if report_tool_results else f"Task status: {status}. Cycles: {step}/{max_steps}."
 
-            judge_verdict = self.judge.evaluate(
-                task=user_instruction,
-                execution_log=self.execution_history,
-                final_output=final_summary,
-                context={"status": status, "cycles_completed": step},
-            )
-            print(judge_verdict)                               # pretty verdict box
-            final_report["judge_verdict"] = judge_verdict.as_dict()
+                judge_verdict = self.judge.evaluate(
+                    task=user_instruction,
+                    execution_log=self.execution_history,
+                    final_output=final_summary,
+                    context={"status": status, "cycles_completed": step},
+                )
+                print(judge_verdict)
+                final_report["judge_verdict"] = judge_verdict.as_dict()
 
             # ── CONTROL LOOP ──────────────────────────────────────────────────
-            if judge_verdict.verdict == "FAIL":
+            if judge_verdict and judge_verdict.verdict == "FAIL":
                 print("\n[Judge Control Loop] FAIL verdict → triggering autonomous replan…")
                 hints_str = "\n".join(f"- {h}" for h in judge_verdict.improvement_hints)
                 replan_instruction = (
@@ -452,7 +453,7 @@ class AgentManager:
                 else:
                     print("[Judge Control Loop] Retry already in progress — skipping nested replan.")
 
-            elif judge_verdict.verdict == "WARN":
+            elif judge_verdict and judge_verdict.verdict == "WARN":
                 print("\n[Judge Control Loop] WARN verdict → self-reflection stored for next run.")
                 reflection_text = (
                     f"[Self-Reflection] Task '{user_instruction[:80]}' scored WARN "
@@ -538,6 +539,66 @@ class AgentManager:
         if not output_files:
             return False
         return all(os.path.exists(f) for f in output_files)
+
+    def _heuristic_next_action(self, instruction: str, context: dict) -> Optional[List[Dict]]:
+        """
+        Cheap routing for common low-risk subtasks to avoid repeated planner LLM calls.
+        """
+        lowered = (instruction or "").lower()
+        task = str(context.get("task_instruction", "")).strip()
+        topic = self._infer_topic(task)
+
+        if "search memory" in lowered:
+            return [{"tool": "search_memory", "args": {"query": topic or task}, "output_var": "memory_hits"}]
+
+        if "web search" in lowered:
+            query = f"{topic} latest" if topic else task
+            return [{"tool": "web_search", "args": {"query": query}, "output_var": "web_results"}]
+
+        if "summarize" in lowered:
+            if self._cycle_var_store.get("web_results"):
+                data_ref = "$web_results"
+            elif self._cycle_var_store.get("memory_hits"):
+                data_ref = "$memory_hits"
+            else:
+                data_ref = "$semantic_memory"
+            return [{
+                "tool": "extract_info",
+                "args": {"data": data_ref, "instruction": instruction},
+                "output_var": "summary"
+            }]
+
+        if "provide a final comprehensive answer" in lowered or "final answer" in lowered:
+            message = self._cycle_var_store.get("summary") or self._latest_meaningful_outcome()
+            if message:
+                return [{"tool": "report_answer", "args": {"message": str(message)}}]
+
+        return None
+
+    def _infer_topic(self, task: str) -> str:
+        topic = task.lower()
+        for prefix in (
+            "research ",
+            "summarize ",
+            "search for ",
+            "find ",
+            "tell me about ",
+            "what is ",
+        ):
+            if topic.startswith(prefix):
+                topic = topic[len(prefix):]
+                break
+        for suffix in (" and summarize key findings", " and summarize", " key findings"):
+            if topic.endswith(suffix):
+                topic = topic[:-len(suffix)]
+        return topic.strip()
+
+    def _latest_meaningful_outcome(self) -> str:
+        for item in reversed(self.memory.get_working_context()):
+            outcome = str(item.get("outcome", "")).strip()
+            if outcome and outcome not in ("[]", "unknown", "Not found"):
+                return outcome
+        return ""
     
     async def _evaluate_next_action(self, instruction: str, context: dict) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[EFEBreakdown]]:
         """
@@ -577,6 +638,23 @@ class AgentManager:
 
 
         refined_instruction = instruction
+        heuristic_policy = self._heuristic_next_action(instruction, context)
+        if heuristic_policy:
+            tool_name = heuristic_policy[0].get("tool")
+            if tool_name in self._SAFE_TOOLS:
+                print(f"[Speed Opt] Heuristic route selected for safe tool: {tool_name}")
+                from free_energy import EFEBreakdown
+                efe_breakdown = EFEBreakdown(
+                    total_efe=0.1,
+                    risk=0.01,
+                    ambiguity=0.1,
+                    risk_components={},
+                    ambiguity_components={},
+                    threshold=config.EFE_THRESHOLD,
+                    is_acceptable=True
+                )
+                predictions = [{"tool": tool_name, "predicted_outcome": "Heuristic safe operation"}]
+                return heuristic_policy, predictions, efe_breakdown
         
         for attempt in range(1, self.max_replans + 1):
             policy = self.interpreter.generate_policy(

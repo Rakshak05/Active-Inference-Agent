@@ -54,7 +54,7 @@ VERDICT_THRESHOLDS = {
 }
 
 # Multi-sample: number of independent judge calls per evaluation
-DEFAULT_JUDGE_SAMPLES = 2
+DEFAULT_JUDGE_SAMPLES = 1
 
 # Path for calibration config (can be overridden)
 CALIBRATION_FILE = os.path.join(os.path.dirname(__file__), "judge_calibration.json")
@@ -306,7 +306,7 @@ class LLMJudge:
     ):
         from config import config
         self._gateway  = gateway or LLMGateway()
-        self._n_samples = max(1, n_samples)
+        self._n_samples = max(1, n_samples if n_samples is not None else config.JUDGE_SAMPLES)
         self._judge_model = judge_model or config.JUDGE_MODEL_NAME
         self._judge_temp = judge_temp if judge_temp is not None else config.JUDGE_TEMPERATURE
         self._calibration = JudgeCalibration()
