@@ -8,6 +8,7 @@ from colorama import Fore, Style
 from ui.terminal_effects import print_typing, spinner
 from ui.onboarding import onboarding
 from memory.profile import is_first_run, load_user, reset_memory
+import asyncio
 
 def check_ram(min_gb=8):
     ram = psutil.virtual_memory().total / (1024**3)
@@ -106,7 +107,7 @@ def run_agent():
         from agent_manager import AgentManager
         agent = AgentManager(efe_threshold=0.8, max_replans=3, session_id=session_id)
 
-        result = agent.process_task(user_instruction=task_str, max_steps=10)
+        result = asyncio.run(agent.process_task(user_instruction=task_str, max_steps=10))
 
         if args.debug:
             print_typing("\n=== FINAL RESULT (DEBUG) ===", color=Fore.CYAN)

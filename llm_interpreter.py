@@ -201,6 +201,8 @@ Respond with a RAW JSON array only — no markdown fences. Example:
             "RULE 3: If the user asks for the 'latest version' of software, DO NOT search memory first. Use 'web_search' to find current info on the internet.\n"
             "RULE 4: For simple requests like 'What is the latest version of X?', the DAG MUST be exactly 2 steps: 1. Search, 2. Report Answer. Do NOT add storage, memory retrieval, or comparison steps.\n"
             "RULE 5: Every informational task MUST conclude with: 'Provide a final comprehensive answer to the user'.\n"
+            "RULE 6: For simple research-and-summarize tasks, prefer a lean DAG: gather evidence, summarize, report. Do NOT add a memory-storage step unless the user explicitly asked to remember/store the findings.\n"
+            "RULE 7: If a web search returns no results, do NOT create follow-up storage tasks for those missing results.\n"
             "Return ONLY a RAW JSON array of objects with these keys:\n"
             "  'id' (string, e.g., 'step_1')\n"
             "  'description' (string, concrete and actionable)\n"

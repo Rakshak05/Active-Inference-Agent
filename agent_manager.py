@@ -18,6 +18,7 @@ import sys
 import os
 import json
 import signal
+import asyncio
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,6 +56,11 @@ from free_energy import ExpectedFreeEnergyEngine, EFEBreakdown
 from memory.memory_manager import MemoryManager
 from planning.planner import DAGTracker
 from llm_judge import LLMJudge
+
+# Parallel Testing Suite imports
+import parallel_testing
+from parallel_testing.events import emit_event
+from parallel_testing.execution_gate import execution_gate
 
 
 @dataclass
@@ -137,7 +143,7 @@ class AgentManager:
         print(f"[Agent Manager] Initialized with EFE threshold: {threshold}")
         print(f"[Agent Manager] Maximum replanning attempts: {self.max_replans}")
     
-    def process_task(self, user_instruction: str, max_steps: int = 15) -> Dict:
+    async def process_task(self, user_instruction: str, max_steps: int = 15) -> Dict:
         """
         Main entry point: Process a user task through the Active Inference loop.
         
@@ -148,6 +154,7 @@ class AgentManager:
         Returns:
             Dictionary containing execution results and metadata
         """
+        await emit_event("TASK_STARTED", instruction=user_instruction)
         print("\n" + "="*80)
         print(f"[Agent Manager] NEW TASK: {user_instruction}")
         print("="*80)
@@ -159,6 +166,7 @@ class AgentManager:
         
         # Persistent variable store shared across ALL cycles (fixes cross-cycle $var loss)
         self._cycle_var_store: dict = {}
+        self._failure_counts: Dict[Tuple[str, str], int] = {}
         
         # PHASE 1: PERCEPTION
         print("\n[PHASE 1: PERCEPTION]")
@@ -174,6 +182,8 @@ class AgentManager:
         self.dag = DAGTracker()
         self.dag.load_from_json(raw_plan)
         
+        await emit_event("PLAN_CREATED", goal=user_instruction, plan=raw_plan)
+        
         # Asynchronous Interrupts Handler
         hitl_interrupt = HITLInterruptHandler()
         
@@ -183,12 +193,14 @@ class AgentManager:
         step = 0
         while step < max_steps and not self.dag.is_fully_completed():
             step += 1
-            print(f"\n--- Cycle {step}/{max_steps} ---")
+            step_id = f"{self.session_id[:4]}-s{step}"
+            print(f"\n--- Cycle {step}/{max_steps} [{step_id}] ---")
+            await emit_event("CYCLE_STARTED", cycle=step, max_steps=max_steps, step_id=step_id)
             
             # Asynchronous Interrupt Processing
             if hitl_interrupt.interrupted:
                 print("\n[HITL Asynchronous Interrupt] Agent execution paused by User.")
-                choice = input("Do you want to (r)esume, (m)odify plan, or (q)uit? [r/m/q]: ").strip().lower()
+                choice = (await asyncio.to_thread(input, "Do you want to (r)esume, (m)odify plan, or (q)uit? [r/m/q]: ")).strip().lower()
                 hitl_interrupt.interrupted = False
                 if choice == 'q':
                     print("User terminated the session via HITL.")
@@ -196,7 +208,7 @@ class AgentManager:
                 elif choice == 'm':
                     print("Current DAG Plan:")
                     print(json.dumps([{"id": t.id, "desc": t.description} for t in self.dag.tasks.values() if t.status != "completed"], indent=2))
-                    new_plan_str = input("Enter new overriding DAG JSON array (or press enter to cancel): ")
+                    new_plan_str = await asyncio.to_thread(input, "Enter new overriding DAG JSON array (or press enter to cancel): ")
                     if new_plan_str:
                         try:
                             self.dag.load_from_json(json.loads(new_plan_str))
@@ -221,6 +233,11 @@ class AgentManager:
                 self.dag.start_task(current_subtask.id)
             
             print(f"> Executing Subtask [{current_subtask.id}]: {current_subtask.description}")
+
+            if self._should_skip_subtask(current_subtask.description):
+                print(f"[Agent Manager] Skipping subtask '{current_subtask.id}' because prerequisite evidence is unavailable.")
+                self.dag.complete_task(current_subtask.id)
+                continue
             
             # Build context: world model state + completed steps summary
             context = self.world_model.get_context()
@@ -233,13 +250,15 @@ class AgentManager:
             
             context["semantic_memory"] = sem_mem
             context["recent_episodes"] = rec_epi
+            context["task_instruction"] = self.current_task
+            context["current_subtask"] = current_subtask.description
             
             # Also make them available as variables for tools
             self._cycle_var_store["semantic_memory"] = sem_mem
             self._cycle_var_store["recent_episodes"] = rec_epi
 
             
-            policy, predictions, efe_breakdown = self._evaluate_next_action(current_subtask.description, context)
+            policy, predictions, efe_breakdown = await self._evaluate_next_action(current_subtask.description, context)
             
             if not policy:
                 print("Unable to determine safe next action. Failing subtask.")
@@ -264,7 +283,7 @@ class AgentManager:
                 print(f"Subtask: {current_subtask.description}")
                 if policy:
                     print(f"Proposed policy: {json.dumps(policy, indent=2)}")
-                clarification = input("Please provide clarification or guidance (or press enter to let agent try anyway): ").strip()
+                clarification = (await asyncio.to_thread(input, "Please provide clarification or guidance (or press enter to let agent try anyway): ")).strip()
                 if clarification:
                     print("[RE-PLANNING HOOK] Adjusting task description based on your clarification...")
                     self.dag.tasks[current_subtask.id].description += "\nUser Clarification: " + clarification
@@ -291,7 +310,19 @@ class AgentManager:
                 self.dag.complete_task(current_subtask.id)
                 continue
 
-            execution_result = self._execute_step(next_action, efe_breakdown)
+            # --- PARALLEL TESTING SUITE: EXECUTION GATE ---
+            gate_decision = await execution_gate.validate_action(next_action, context, step_id=step_id)
+            if not gate_decision["allowed"]:
+                print(f"[Execution Gate] BLOCKED: {gate_decision['reason']}")
+                await emit_event("ACTION_BLOCKED", action=next_action, reason=gate_decision["reason"], step_id=step_id)
+                # Feed the block back as a failure for re-planning
+                context["failure_feedback"] = f"EXECUTION GATE BLOCKED ACTION: {gate_decision['reason']} - Choose a safer alternative."
+                self.dag.tasks[current_subtask.id].status = "pending"
+                continue
+
+            await emit_event("STEP_PROPOSED", action=next_action[0].get('tool'), args=next_action[0].get('args'), step_id=step_id)
+            execution_result = await self._execute_step(next_action, efe_breakdown)
+            await emit_event("STEP_COMPLETED", action=next_action[0].get('tool'), status=execution_result.get("status"), result=execution_result, step_id=step_id)
             
             # Update Beliefs with Observation
             self.world_model.update_beliefs(execution_result)
@@ -300,6 +331,9 @@ class AgentManager:
                 # SPEED OPTIMIZATION: Skip validation for safe gathering tools unless it's a reporting tool
                 if action_tool in self._SAFE_TOOLS and action_tool not in self._REPORT_TOOLS:
                     print(f"[Speed Opt] Assuming success for safe tool: {action_tool}")
+                    print(f"  └─ [Agent Manager] Subtask '{current_subtask.id}' marked completed via fast path.")
+                    self.dag.complete_task(current_subtask.id)
+                    continue
                 else:
                     print("[Self-Evaluation] Running Post-Action Validation...")
                 
@@ -330,12 +364,23 @@ class AgentManager:
             # Stop if there was a critical failure
             if execution_result.get("status") == "error":
                 print(f"Subtask execution error: {execution_result}")
+                failure_key = (current_subtask.id, action_tool)
+                self._failure_counts[failure_key] = self._failure_counts.get(failure_key, 0) + 1
                 
                 # RE-PLANNING HOOK / Internal self-correction iteration
                 print("[RE-PLANNING HOOK] Feeding error back as an observation for self-correction...")
                 # Extract specific error for better feedback
                 error_msg = execution_result["results"][-1].get("error", str(execution_result)) if execution_result.get("results") else str(execution_result)
                 context["failure_feedback"] = f"Action {action_tool} failed: {error_msg}. Analyze the error and generate a new action to fix the issue."
+
+                if self._should_fail_fast(current_subtask.id, action_tool, execution_result):
+                    print(f"[Fail-Fast] Repeated dead-end on '{action_tool}'. Completing subtask with degraded result.")
+                    self.memory.add_working_context({
+                        "tool": action_tool,
+                        "outcome": f"Failed fast after repeated attempts: {error_msg}"
+                    })
+                    self.dag.complete_task(current_subtask.id)
+                    continue
                 
                 # Keep task pending to retry locally instead of failing the whole DAG
                 self.dag.tasks[current_subtask.id].status = "pending"
@@ -359,6 +404,8 @@ class AgentManager:
             "execution_history": self.execution_history,
             "timestamp": datetime.now().isoformat()
         }
+        
+        await emit_event("TASK_COMPLETED", status=status, cycles=step)
         
         print("\n" + "="*80)
         print("[TASK COMPLETE]")
@@ -398,7 +445,7 @@ class AgentManager:
                 if not getattr(self, '_judge_retry_active', False):
                     self._judge_retry_active = True
                     try:
-                        retry_report = self.process_task(replan_instruction, max_steps=max_steps)
+                        retry_report = await self.process_task(replan_instruction, max_steps=max_steps)
                         final_report["judge_retry"] = retry_report
                     finally:
                         self._judge_retry_active = False
@@ -436,7 +483,37 @@ class AgentManager:
 
     _WRITE_TOOLS = {"write_file", "write_csv", "write_json", "create_directory", "copy_file", "move_file", "download_file"}
     _REPORT_TOOLS = {"report_answer", "log_message"}
-    _SAFE_TOOLS = {"read_file", "list_directory", "search_memory", "check_path", "log_message", "report_answer", "read_json", "read_csv", "filter_records", "transform_records", "slice_records", "get_field_values", "evaluate", "web_search", "http_get", "extract_info"}
+    _SAFE_TOOLS = {"read_file", "list_directory", "search_memory", "store_memory", "check_path", "log_message", "report_answer", "read_json", "read_csv", "filter_records", "transform_records", "slice_records", "get_field_values", "evaluate", "web_search", "http_get", "extract_info"}
+
+    def _should_fail_fast(self, subtask_id: str, action_tool: str, execution_result: Dict) -> bool:
+        """
+        Prevent expensive loops on repeated low-information failures.
+        """
+        count = self._failure_counts.get((subtask_id, action_tool), 0)
+        if count < 2:
+            return False
+
+        if action_tool == "web_search":
+            results = execution_result.get("results", [])
+            if results and results[-1].get("raw") == []:
+                return True
+            if execution_result.get("error") in ("[]", [], None):
+                return True
+
+        return False
+
+    def _should_skip_subtask(self, subtask_description: str) -> bool:
+        """
+        Skip planner-generated subtasks that are invalidated by earlier outcomes.
+        """
+        desc = (subtask_description or "").lower()
+        if "store key findings" in desc or "store" in desc and "memory" in desc:
+            for item in reversed(self.memory.get_working_context()):
+                tool = str(item.get("tool", "")).lower()
+                outcome = str(item.get("outcome", ""))
+                if tool == "web_search" and "Failed fast after repeated attempts" in outcome:
+                    return True
+        return False
 
     def _is_task_complete(self, instruction: str, last_tool: str) -> bool:
         """
@@ -462,7 +539,7 @@ class AgentManager:
             return False
         return all(os.path.exists(f) for f in output_files)
     
-    def _evaluate_next_action(self, instruction: str, context: dict) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[EFEBreakdown]]:
+    async def _evaluate_next_action(self, instruction: str, context: dict) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[EFEBreakdown]]:
         """
         Evaluates EFE to select the best next immediate action.
         Passes completed-step history so the LLM knows what's done.
@@ -566,7 +643,7 @@ class AgentManager:
             
         return None, None, None
 
-    def _execute_step(self, action: List[Dict], efe_breakdown: Optional[EFEBreakdown]) -> Dict:
+    async def _execute_step(self, action: List[Dict], efe_breakdown: Optional[EFEBreakdown]) -> Dict:
         """
         Execute a single action via Toolgate, using the persistent cross-cycle
         variable store so $var references survive between cycles.
@@ -606,13 +683,13 @@ class AgentManager:
 
                 approved = False
                 while not approved:
-                    choice = input("[HITL] Do you approve? (y)es, (n)o, (e)dit: ").strip().lower()
+                    choice = (await asyncio.to_thread(input, "[HITL] Do you approve? (y)es, (n)o, (e)dit: ")).strip().lower()
                     if choice in ['y', 'yes', '']:
                         approved = True
                     elif choice in ['n', 'no']:
                         raise Exception("HITL Validation Failed: User rejected the pending action.")
                     elif choice in ['e', 'edit']:
-                        new_args = input("Enter new overriding JSON arguments: ")
+                        new_args = await asyncio.to_thread(input, "Enter new overriding JSON arguments: ")
                         try:
                             resolved_step["args"] = json.loads(new_args)
                             print("Override applied successfully.")

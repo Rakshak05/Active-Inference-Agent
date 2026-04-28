@@ -43,6 +43,7 @@ class Config:
 
     # HTTP adapter
     HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
-    LLM_TIMEOUT  = int(os.getenv("LLM_TIMEOUT", "600"))
+    # LLM_TIMEOUT  = int(os.getenv("LLM_TIMEOUT", "600"))
+    LLM_TIMEOUT  = int(os.getenv("LLM_TIMEOUT", "90"))
 
 config = Config()

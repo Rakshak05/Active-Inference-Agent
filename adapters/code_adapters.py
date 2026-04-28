@@ -85,6 +85,18 @@ def execute_python_adapter(step: dict) -> Any:
         line = sep.join(str(x) for x in a) + end
         captured_output.write(line)
         old_print(*a, **kw)   # also shows in server console
+        
+        # Parallel Testing Suite: Emit terminal output event
+        try:
+            import asyncio
+            from parallel_testing.events import emit_event
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(emit_event("TERMINAL_OUTPUT", line=line, source="execute_python"))
+            else:
+                asyncio.run(emit_event("TERMINAL_OUTPUT", line=line, source="execute_python"))
+        except Exception:
+            pass
 
     namespace["print"] = captured_print
 
