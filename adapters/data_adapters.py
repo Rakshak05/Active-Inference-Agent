@@ -215,6 +215,9 @@ def extract_info_adapter(step: dict):
         if documents:
             keywords = [word for word in re.findall(r"\w+", instruction.lower()) if len(word) > 3]
             keyword_hits = [doc for doc in documents if any(word in doc.lower() for word in keywords)]
+            if keywords and not keyword_hits:
+                print(f"[Data] extract_info fast path: instructions='{instruction}' -> Not found")
+                return "Not found"
             chosen = keyword_hits[:3] if keyword_hits else documents[:3]
             print(f"[Data] extract_info fast path: instructions='{instruction}'")
             return " ".join(chosen)[:2000]

@@ -19,6 +19,7 @@ import os
 import json
 import signal
 import asyncio
+import re
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -569,7 +570,7 @@ class AgentManager:
             }]
 
         if "provide a final comprehensive answer" in lowered or "final answer" in lowered:
-            message = self._cycle_var_store.get("summary") or self._latest_meaningful_outcome()
+            message = self._build_final_answer(task)
             if message:
                 return [{"tool": "report_answer", "args": {"message": str(message)}}]
 
@@ -599,6 +600,47 @@ class AgentManager:
             if outcome and outcome not in ("[]", "unknown", "Not found"):
                 return outcome
         return ""
+
+    def _is_research_like_task(self, task: str) -> bool:
+        lowered = (task or "").lower()
+        keywords = ("research", "latest", "summarize", "summary", "findings", "papers", "information")
+        return any(keyword in lowered for keyword in keywords)
+
+    def _has_relevant_evidence(self, topic: str) -> bool:
+        topic_terms = [term for term in re.findall(r"\w+", topic.lower()) if len(term) > 3]
+        if not topic_terms and topic:
+            topic_terms = [topic.lower()]
+
+        candidate_sources = []
+        for key in ("web_results", "memory_hits", "semantic_memory"):
+            value = self._cycle_var_store.get(key)
+            if value:
+                candidate_sources.extend(value if isinstance(value, list) else [value])
+
+        if not candidate_sources:
+            for item in reversed(self.memory.get_working_context()):
+                candidate_sources.append(item.get("outcome", ""))
+
+        for item in candidate_sources:
+            text = str(item).lower()
+            if any(term in text for term in topic_terms):
+                return True
+        return False
+
+    def _build_final_answer(self, task: str) -> str:
+        topic = self._infer_topic(task)
+        summary = str(self._cycle_var_store.get("summary", "")).strip()
+        if summary and summary != "Not found" and self._has_relevant_evidence(topic):
+            return summary
+
+        if self._is_research_like_task(task):
+            topic_text = topic or "the requested topic"
+            return (
+                f"I could not verify current external evidence for {topic_text}. "
+                f"My retrieval steps did not find reliable supporting results, so I should not present a confident researched summary."
+            )
+
+        return summary or self._latest_meaningful_outcome() or "I could not gather enough evidence to answer confidently."
     
     async def _evaluate_next_action(self, instruction: str, context: dict) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[EFEBreakdown]]:
         """

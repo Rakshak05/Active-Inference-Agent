@@ -2,6 +2,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from agent_manager import AgentManager
+from adapters.data_adapters import extract_info_adapter
 from parallel_testing.execution_gate import ExecutionGate
 from parallel_testing.expectation_checker import ExpectationChecker
 from parallel_testing.narrative_pressure_test import NarrativePressureTest
@@ -100,6 +102,35 @@ class ExpectationCheckerSuite(unittest.TestCase):
         outcome = checker._extract_actual_outcome(result)
 
         self.assertEqual(outcome, "Readme contents retrieved | Summary written")
+
+
+class EvidenceGroundingSuite(unittest.TestCase):
+    def test_extract_info_returns_not_found_for_irrelevant_documents(self):
+        result = extract_info_adapter({
+            "args": {
+                "data": [
+                    {"document": "CUDA Toolkit 13.1 Update 1"},
+                    {"document": "My company uses PostgreSQL"},
+                ],
+                "instruction": "Summarize key findings about active inference",
+            }
+        })
+
+        self.assertEqual(result, "Not found")
+
+    def test_build_final_answer_uses_honest_research_fallback_without_evidence(self):
+        agent = AgentManager.__new__(AgentManager)
+        agent._cycle_var_store = {"summary": "Active inference is a theory..."}
+
+        class FakeMemory:
+            def get_working_context(self):
+                return [{"tool": "web_search", "outcome": "Failed fast after repeated attempts: []"}]
+
+        agent.memory = FakeMemory()
+
+        answer = agent._build_final_answer("Research active inference and summarize key findings")
+
+        self.assertIn("could not verify current external evidence", answer)
 
 
 if __name__ == "__main__":
